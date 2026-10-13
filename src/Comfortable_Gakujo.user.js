@@ -8,7 +8,10 @@
 // @match        https://idp.shizuoka.ac.jp/*
 // @run-at       document-start
 // @inject-into  page
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
 // @updateURL    https://github.com/woody-1227/Comfortable-Gakujo/raw/main/src/Comfortable_Gakujo.user.js
 // @downloadURL  https://github.com/woody-1227/Comfortable-Gakujo/raw/main/src/Comfortable_Gakujo.user.js
 // @icon         https://github.com/woody-1227/Comfortable-Gakujo/raw/main/src/icon.png
@@ -119,19 +122,15 @@
     });
 
     const setCookie = (name, value, days = 365) => {
-        const expires = new Date(Date.now() + days * 864e5).toUTCString();
-        document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/`;
+        GM_setValue(name, value);
     };
 
     const getCookie = (name) => {
-        return document.cookie
-            .split("; ")
-            .find(row => row.startsWith(name + "="))
-            ?.split("=")[1];
+        return GM_getValue(name, undefined);
     };
 
     const deleteCookie = (name) => {
-        document.cookie = `${name}=; max-age=0; path=/`;
+        GM_deleteValue(name);
     };
 
     const seenCharts = new WeakSet();
@@ -347,20 +346,15 @@
 
         const getHiddenTasks = () => {
             let hiddenTasks = [];
-            const cookies = document.cookie.split(';');
+            const keys = GM_listValues();
 
-            cookies.forEach(cookie => {
-                const trimmed = cookie.trim();
-                if (trimmed.startsWith('cg_hidden_')) {
-                    const equalIndex = trimmed.indexOf('=');
-                    if (equalIndex > -1) {
-                        const value = trimmed.substring(equalIndex + 1);
-                        try {
-                            const task = JSON.parse(decodeURIComponent(value));
-                            hiddenTasks.push(task);
-                        } catch (e) {
-
-                        }
+            keys.forEach(key => {
+                if (key.startsWith('cg_hidden_')) {
+                    const value = getCookie(key);
+                    try {
+                        const task = JSON.parse(decodeURIComponent(value));
+                        hiddenTasks.push(task);
+                    } catch (e) {
                     }
                 }
             });
@@ -383,24 +377,18 @@
         };
 
         const removeHiddenTask = (submissionType, subject, title) => {
-            const cookies = document.cookie.split(';');
-            cookies.forEach(cookie => {
-                const trimmed = cookie.trim();
-                if (trimmed.startsWith('cg_hidden_')) {
-                    const equalIndex = trimmed.indexOf('=');
-                    if (equalIndex > -1) {
-                        const cookieName = trimmed.substring(0, equalIndex);
-                        const value = trimmed.substring(equalIndex + 1);
-                        try {
-                            const task = JSON.parse(decodeURIComponent(value));
-                            if (task.submissionType === submissionType &&
-                                task.subject === subject &&
-                                task.title === title) {
-                                deleteCookie(cookieName);
-                            }
-                        } catch (e) {
-
+            const keys = GM_listValues();
+            keys.forEach(key => {
+                if (key.startsWith('cg_hidden_')) {
+                    const value = getCookie(key);
+                    try {
+                        const task = JSON.parse(decodeURIComponent(value));
+                        if (task.submissionType === submissionType &&
+                            task.subject === subject &&
+                            task.title === title) {
+                            deleteCookie(key);
                         }
+                    } catch (e) {
                     }
                 }
             });
