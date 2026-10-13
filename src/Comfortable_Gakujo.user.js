@@ -981,6 +981,10 @@
             const processTable = () => {
                 const table = document.getElementById("dataTable01");
                 const tbody = table?.querySelector("tbody");
+                const reverseRows =
+                    document.getElementById("submitKbn3")?.checked
+                    || document.getElementById("submitKbn4")?.checked || false;
+
                 if (!tbody) return;
 
                 tbody.querySelectorAll("tr").forEach((row, index) => {
@@ -988,7 +992,15 @@
                 });
 
                 const rows = Array.from(tbody.querySelectorAll("tr"));
-                rows.sort((a, b) => getDeadlineDate(a) - getDeadlineDate(b)).forEach(row => {
+                const sortedRows = rows.sort((a, b) => {
+                    const dateOffset = getDeadlineDate(a) - getDeadlineDate(b);
+                    if (reverseRows) {
+                        return -dateOffset;
+                    } else {
+                        return dateOffset;
+                    }
+                });
+                sortedRows.forEach(row => {
                     tbody.appendChild(row);
                 });
 
