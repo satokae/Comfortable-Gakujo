@@ -1309,6 +1309,7 @@
                 const markAsRead = document.createElement('div');
                 markAsRead.className = "c-filter_box c-form-box";
                 markAsRead.style.left = "20px";
+                markAsRead.style.width = "fit-content";
                 markAsRead.innerHTML = `<button type="button" id="cg-mark-as-read" dialogtype="" reportoutputconfirm="true" loading="true" class="c-btn c-btn-submit01" filetype="null"><span class="c-btn-link"><span class="c-btn-text ">すべて既読にする</span></span></button>`;
                 cPageNation.childNodes[0].insertBefore(markAsRead, cPageNation.childNodes[0].firstChild);
 
