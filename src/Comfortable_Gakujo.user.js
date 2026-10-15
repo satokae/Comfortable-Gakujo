@@ -764,7 +764,7 @@
             uploaderWrapper.appendChild(uploadBtn);
             uploaderWrapper.appendChild(removeBtn);
             uploaderWrapper.appendChild(fileInput);
-            contents.appendChild(uploaderWrapper);
+            //contents.appendChild(uploaderWrapper);
 
             fileInput.addEventListener("change", (event) => {
                 const file = event.target.files[0];
