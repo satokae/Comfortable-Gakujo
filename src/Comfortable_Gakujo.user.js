@@ -840,16 +840,11 @@
                             btn.style.fontSize = '18px';
                             btn.style.cursor = 'pointer';
                             btn.style.border = 'none';
-                            btn.style.background = '#eee';
+                            btn.style.background = '#2a3441';
+                            btn.style.color = '#eee';
                             btn.style.borderRadius = '4px';
                             btn.style.transition = 'background 0.2s';
 
-                            btn.addEventListener('mouseenter', () => {
-                                btn.style.background = '#ccc';
-                            });
-                            btn.addEventListener('mouseleave', () => {
-                                btn.style.background = '#eee';
-                            });
                             btn.addEventListener('click', (e) => {
                                 const row = e.target.closest('tr');
                                 row.style.display = 'none';
@@ -1013,12 +1008,12 @@
 
                     const statusCell = row.querySelector('td[data-label*="提出状況"]');
                     if (statusCell && statusCell.textContent.includes("提出済")) {
-                        row.style.backgroundColor = "#e5ffe5";
+                        row.style.backgroundColor = "#e1e8f8";
                         row.addEventListener('mouseover', () => {
-                            row.style.backgroundColor = "#d1ffd1";
+                            row.style.backgroundColor = "#b2b8c4";
                         });
                         row.addEventListener('mouseout', () => {
-                            row.style.backgroundColor = "#e5ffe5";
+                            row.style.backgroundColor = "#e1e8f8";
                         });
                     }
 
