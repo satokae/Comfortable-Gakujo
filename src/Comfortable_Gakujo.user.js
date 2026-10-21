@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Comfortable Gakujo
 // @namespace    http://tampermonkey.net/
-// @version      1.10.1
+// @version      1.11.3
 // @description  READMEを必ず読んでからご利用ください：https://github.com/woody-1227/Comfortable-Gakujo/blob/main/README.md
 // @author       woody_1227
 // @match        https://gakujo.shizuoka.ac.jp/*
@@ -20,14 +20,14 @@
 (function () {
     'use strict';
 
-    const version = "1.10.1";
+    const version = "1.11.3";
     const updateURL = "https://github.com/woody-1227/Comfortable-Gakujo/raw/main/src/Comfortable_Gakujo.user.js";
 
     function waitForDomStability({
         timeout = 10000,
         stableTime = 500
     } = {}) {
-        return new Promise((resolve, reject) => {
+        return new Promise(resolve => {
             let lastMutation = Date.now();
 
             const observer = new MutationObserver(() => {
@@ -49,9 +49,10 @@
                     resolve();
                 } else if (now - start > timeout) {
                     observer.disconnect();
-                    reject(new Error("DOM stability timeout"));
+                    console.debug("[CG] DOM keeps updating; continue initialization");
+                    resolve();
                 } else {
-                    requestAnimationFrame(check);
+                    setTimeout(check, 50);
                 }
             };
 
@@ -76,28 +77,21 @@
         });
     }
 
-    window.addEventListener("load", async () => {
-        const step = sessionStorage.getItem("cg_grade_nav");
+    // Check existing content as well as future mutations.
+    function observeUntilReady(check) {
+        const observer = new MutationObserver(() => {
+            if (check()) observer.disconnect();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        if (check()) observer.disconnect();
+    }
 
-        if (step === "dashboard") {
-            if (document.title === "成績ダッシュボード") {
-                sessionStorage.setItem("cg_grade_nav", "detail");
-                const btn = document.getElementsByClassName("c-btn-submit01")[0];
-                btn.click();
-            } else {
-                sessionStorage.removeItem("cg_grade_nav");
-            }
-        } else if (step === "detail") {
-            if (document.title === "成績情報") {
-                sessionStorage.removeItem("cg_grade_nav");
-                const btn = document.getElementsByClassName("c-btn-submit01")[1];
-                btn.click();
-            } else {
-                sessionStorage.removeItem("cg_grade_nav");
-            }
-        }
-
+    let initializationStarted = false;
+    async function initializeComfortableGakujo() {
+        if (initializationStarted) return;
+        initializationStarted = true;
         try {
+            sessionStorage.removeItem("cg_grade_nav");
             console.log("[CG] window load");
 
             await waitForDomStability();
@@ -119,7 +113,13 @@
         } catch (e) {
             console.warn("[CG] initialization failed:", e);
         }
-    });
+    }
+
+    if (document.readyState === "complete") {
+        setTimeout(initializeComfortableGakujo, 0);
+    } else {
+        window.addEventListener("load", initializeComfortableGakujo, { once: true });
+    }
 
     const setCookie = (name, value, days = 365) => {
         GM_setValue(name, value);
@@ -133,84 +133,126 @@
         GM_deleteValue(name);
     };
 
-    const seenCharts = new WeakSet();
-
-    function installChartHook() {
-        if (!window.Chart || !Chart.prototype) return false;
-        if (Chart.prototype._gakujo_grade_hooked) return true;
-
-        Chart.prototype._gakujo_grade_hooked = true;
-
-        const originalUpdate = Chart.prototype.update;
-
-        Chart.prototype.update = function (...args) {
-            try {
-                const labels = this.data?.labels;
-                const datasets = this.data?.datasets;
-
-                if (
-                    !Array.isArray(labels) ||
-                    !Array.isArray(datasets) ||
-                    datasets.length === 0 ||
-                    !datasets.some(ds => Array.isArray(ds.data) && ds.data.length > 0)
-                ) {
-                    return originalUpdate.apply(this, args);
-                }
-
-                if (seenCharts.has(this)) {
-                    return originalUpdate.apply(this, args);
-                }
-                seenCharts.add(this);
-
-                if (getChartTitle(this).includes("年度別修得評価")) {
-                    gradeJson = normalizeGradeChart(labels, datasets);
-                    console.log("[CG] Grade chart detected:", gradeJson);
-                    if (getCookie("cg_grade_save_enabled") === "1") {
-                        saveGradeJson(gradeJson);
-                    }
-                } else {
-                }
-            } catch (e) {
-                console.warn("[CG] Chart hook error", e);
-            }
-
-            return originalUpdate.apply(this, args);
-        };
-
-        console.log("[CG] Chart.js hook installed");
-        return true;
+    // Resolve only known form submissions; never execute scripts from fetched HTML.
+    function pageSubmission(doc, baseURL, control) {
+        const source = `${control?.getAttribute("onclick") || ""} ${control?.getAttribute("href") || ""}`;
+        const match = source.match(/postSubmit\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/);
+        if (!match && control?.matches("a[href]") && !/^(javascript:|#)/i.test(control.getAttribute("href"))) {
+            const url = new URL(control.getAttribute("href"), baseURL);
+            if (url.origin !== location.origin) throw new Error("学情以外への送信はできません。");
+            return { url, data: new FormData(), method: "GET" };
+        }
+        const buttonMatch = source.match(/submitFormButton\(\s*\$\(this\)\s*,\s*['"]([^'"]+)['"]/);
+        const formId = control?.getAttribute("formid") || control?.getAttribute("form");
+        const form = match ? doc.getElementById(match[1]) : formId ? doc.getElementById(formId) : control?.closest("form");
+        if (!form) throw new Error("送信フォームが見つかりません。");
+        const action = match ? match[2] : buttonMatch ? buttonMatch[1] : control.getAttribute("formaction") || form.getAttribute("action");
+        if (!action) throw new Error("送信先が見つかりません。");
+        const url = new URL(action, baseURL);
+        if (url.origin !== location.origin) throw new Error("学情以外への送信はできません。");
+        const data = new FormData(form);
+        if (!match && control.name) data.append(control.name, control.value);
+        return { url, data, method: match || buttonMatch ? "POST" : (form.getAttribute("method") || "GET").toUpperCase() };
     }
 
-    const waitTimer = setInterval(() => {
-        if (installChartHook()) clearInterval(waitTimer);
-    }, 50);
-
-    function normalizeGradeChart(labels, datasets) {
-        const result = {};
-
-        labels.forEach(label => {
-            result[label] = {
-                grades: {}
-            };
-        });
-
-        datasets.forEach(ds => {
-            const name = ds.label;
-            const values = ds.data.map(v => Number(v));
-
-            if (!name.includes("GPA")) {
-                labels.forEach((label, i) => {
-                    if (!isNaN(values[i])) {
-                        result[label].grades[name] = values[i];
-                    }
-                });
-            }
-        });
-
-        return result;
+    function explicitSubmission(doc, baseURL, formId, action) {
+        const form = doc.getElementById(formId);
+        if (!form) throw new Error("学情のフォームが見つかりません。");
+        return { url: new URL(action, baseURL), data: new FormData(form), method: "POST" };
     }
 
-    let gradeJson = "";
+    async function fetchPage(request) {
+        const url = new URL(request.url);
+        const options = { method: request.method, credentials: "same-origin", cache: "no-store" };
+        const body = new URLSearchParams(request.data);
+        if (request.method === "GET") {
+            body.forEach((value, key) => url.searchParams.append(key, value));
+        } else {
+            options.body = body;
+        }
+        const response = await fetch(url, options);
+        if (!response.ok || new URL(response.url).origin !== location.origin) {
+            throw new Error("ページ取得に失敗しました。再ログインが必要な可能性があります。");
+        }
+        const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+        return { doc, url: new URL(doc.querySelector("base[href]")?.getAttribute("href") || response.url, response.url).href };
+    }
+
+    async function openCreditInfo(button) {
+        if (button.dataset.cgBusy) return;
+        button.dataset.cgBusy = "1";
+        try {
+            const dashboard = await fetchPage(explicitSubmission(document, location.href, "emptyForm", "SC_15005B00_01/init"));
+            if (dashboard.doc.title !== "成績ダッシュボード") throw new Error("成績ダッシュボードを取得できませんでした。");
+            const info = await fetchPage(pageSubmission(dashboard.doc, dashboard.url, Array.from(dashboard.doc.querySelectorAll(".c-btn-submit01")).find(control => control.textContent.trim() === "成績情報詳細")));
+            if (info.doc.title !== "成績情報") throw new Error("成績情報を取得できませんでした。");
+            const request = pageSubmission(info.doc, info.url, Array.from(info.doc.querySelectorAll(".c-btn-submit01")).find(control => control.textContent.trim() === "単位修得情報照会"));
+            // Only the destination is displayed, using fresh fields from the fetched page.
+            const form = document.createElement("form");
+            form.method = request.method;
+            form.action = request.url.href;
+            form.hidden = true;
+            for (const [name, value] of request.data) {
+                if (typeof value !== "string") continue;
+                const input = document.createElement("input");
+                input.type = "hidden";
+                input.name = name;
+                input.value = value;
+                form.appendChild(input);
+            }
+            document.body.appendChild(form);
+            HTMLFormElement.prototype.submit.call(form);
+            form.remove();
+        } catch (error) {
+            console.warn("[CG] 単位情報取得失敗", error);
+            alert("単位情報を取得できませんでした。成績メニューから開くか、再ログイン後にお試しください。");
+        } finally {
+            delete button.dataset.cgBusy;
+        }
+    }
+
+    function gradeSnapshot(doc) {
+        const table = doc.getElementById("02");
+        if (!table || !table.querySelector('td[data-label="成績報告時期"]')) {
+            throw new Error("成績明細の表を確認できませんでした。");
+        }
+        // Ignore sorting, pagination controls, and presentation-only whitespace.
+        return Array.from(table.querySelectorAll("tbody tr"), row =>
+            Array.from(row.querySelectorAll("td[data-label]"), cell =>
+                [cell.getAttribute("data-label"), cell.textContent.replace(/\s+/g, " ").trim()]
+            )
+        ).filter(row => row.length).map(row => JSON.stringify(row)).sort();
+    }
+
+    let gradeCheckRunning = false;
+    async function checkGradeUpdates() {
+        if (gradeCheckRunning || getCookie("cg_grade_save_enabled") !== "1") return;
+        gradeCheckRunning = true;
+        try {
+            let gradeDoc = document;
+            if (document.title === "ホーム画面（学生・保護者）") {
+                const dashboard = await fetchPage(explicitSubmission(document, location.href, "emptyForm", "SC_15005B00_01/init"));
+                if (dashboard.doc.title !== "成績ダッシュボード") throw new Error("成績ダッシュボードを取得できませんでした。");
+                const detail = Array.from(dashboard.doc.querySelectorAll(".c-btn-submit01")).find(control =>
+                    control.textContent.trim() === "成績情報詳細");
+                const info = await fetchPage(pageSubmission(dashboard.doc, dashboard.url, detail));
+                if (!["成績情報", "成績情報詳細"].includes(info.doc.title)) throw new Error("成績情報を取得できませんでした。");
+                gradeDoc = info.doc;
+            } else if (!["成績情報", "成績情報詳細"].includes(document.title)) {
+                return;
+            }
+            const hash = "detail-v1:" + await sha256(JSON.stringify(gradeSnapshot(gradeDoc)));
+            if (getCookie("cg_grade_save_enabled") !== "1") return;
+            const previous = decodeURIComponent(getCookie("cg_grade") || "");
+            if (previous.startsWith("detail-v1:") && previous !== hash) setCookie("cg_grade_updated", "1");
+            setCookie("cg_grade", hash);
+            showUpdateNotice();
+        } catch (error) {
+            console.warn("[CG] 成績更新確認失敗（前回のデータを保持）", error);
+        } finally {
+            gradeCheckRunning = false;
+        }
+    }
 
     function showUpdateNotice() {
         if (getCookie("cg_grade_updated") !== "1") return (false);
@@ -222,7 +264,7 @@
 
         const notice = document.createElement("div");
         notice.className = "cg-grade-notice-container";
-        notice.innerHTML = `<button class="cg-grade-notice-button c-main-menu-btn" onclick="showLoading();postSubmit('SC_01002B00_Form', 'SC_01002B00_01/studentRecordAnnouncementContentsLink')"><i class="c-icon-notice" aria-hidden="true" style="margin-right: 0.5em"></i>成績が更新されました</button>`;
+        notice.innerHTML = `<button class="cg-grade-notice-button c-main-menu-btn" onclick="showLoading();postSubmit('emptyForm', 'SC_15005B00_01/init')"><i class="c-icon-notice" aria-hidden="true" style="margin-right: 0.5em"></i>成績が更新されました</button>`;
 
         const style = document.createElement('style');
         style.textContent = `
@@ -295,54 +337,364 @@
         return (true);
     }
 
-    async function saveGradeJson(newJson) {
-        const prev = getCookie("cg_grade");
-        console.log("[CG] Saving grade JSON:", newJson, "Previous:", prev);
-        const newStr = await sha256(JSON.stringify(newJson));
-
-        if (prev && decodeURIComponent(prev) !== newStr) {
-            setCookie("cg_grade_updated", "1");
-        }
-
-        setCookie("cg_grade", newStr);
-    }
-
-    function getChartTitle(chart) {
-        // Chart.js v3+
-        const t3 = chart.options?.plugins?.title?.text;
-        if (typeof t3 === "string") return t3;
-        if (Array.isArray(t3)) return t3.join("");
-
-        // Chart.js v2
-        const t2 = chart.options?.title?.text;
-        if (typeof t2 === "string") return t2;
-        if (Array.isArray(t2)) return t2.join("");
-
-        return "";
-    }
-
-    (function watchCookie() {
-        let last = getCookie("cg_grade_updated");
-
-        const intervalId = setInterval(() => {
-            const now = getCookie("cg_grade_updated");
-            if (now !== last) {
-                last = now;
-                if (showUpdateNotice()) {
-                    clearInterval(intervalId);
-                }
-            }
-        }, 500);
-    })();
-
     async function sha256(text) {
         const uint8 = new TextEncoder().encode(text)
         const digest = await crypto.subtle.digest('SHA-256', uint8)
         return Array.from(new Uint8Array(digest)).map(v => v.toString(16).padStart(2, '0')).join('')
     }
 
+    function formatTimeLeft(ms, precision = 0) {
+        const d = Math.floor(ms / (1000 * 60 * 60 * 24));
+        const h = Math.floor(ms / (1000 * 60 * 60)) % 24;
+        const m = Math.floor(ms / (1000 * 60)) % 60;
+        const s = Math.floor(ms / 1000) % 60;
+        const dayStr = d > 0 ? `${d}日 ` : '';
+        const digits = precision === true ? 1 : precision === 2 ? 2 : 0;
+        const fraction = digits ? `.${Math.floor((ms % 1000) / (10 ** (3 - digits))).toString().padStart(digits, '0')}` : '';
+        const seconds = s.toString().padStart(2, '0') + fraction;
+        return `残り ${dayStr}${h.toString().padStart(2, '0')}時間 ${m.toString().padStart(2, '0')}分 ${seconds}秒`;
+    }
+
+    function renderDeadlineCountdown(timer, remaining, precision = 0) {
+        const expired = remaining <= 0;
+        timer.textContent = expired ? "締切済み" : formatTimeLeft(remaining, precision);
+        Object.assign(timer.style, {
+            color: remaining < 86400000 ? "red" : remaining < 3 * 86400000 ? "#FF8C00" : "",
+            fontWeight: remaining < 3 * 86400000 ? "bold" : "",
+            textDecoration: !expired && remaining < 86400000 ? "underline" : ""
+        });
+    }
+
+    function homeTaskDeadline(text) {
+        const normalized = text.normalize("NFKC");
+        const dates = Array.from(normalized.matchAll(/(\d{4})[年/.-](\d{1,2})[月/.-](\d{1,2})日?(?:\s*[（(][^）)]*[）)])?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/g));
+        // A submission period contains both dates; its last date is the deadline.
+        if (!dates.length) return NaN;
+        const labelled = dates.find(match => /(?:締(?:め)?切(?:り)?(?:日時|日)?|提出期限)\s*[:：]?\s*$/.test(normalized.slice(0, match.index)));
+        const [, year, month, day, hour, minute, second = "0"] = labelled || dates[dates.length - 1];
+        if (+month < 1 || +month > 12 || +day < 1 || +day > 31 || +hour > 23 || +minute > 59 || +second > 59) return NaN;
+        // University deadlines use Japan time, even if the browser uses another timezone.
+        const value = Date.UTC(+year, +month - 1, +day, +hour - 9, +minute, +second);
+        const local = new Date(value + 9 * 3600000);
+        return local.getUTCMonth() === +month - 1 && local.getUTCDate() === +day ? value : NaN;
+    }
+
+    function nearestHomeDeadline(texts, now) {
+        return texts.map(homeTaskDeadline).filter(deadline => Number.isFinite(deadline) && deadline > now)
+            .reduce((nearest, deadline) => Math.min(nearest, deadline), Infinity);
+    }
+
+    function updateDeadlineBackground(visual, remaining) {
+        if (!visual) return;
+        const urgency = remaining > 0 && remaining < 86400000 ? "critical"
+            : remaining > 0 && remaining < 3 * 86400000 ? "warning" : "";
+        // Override only the presentation; the user's saved image stays untouched.
+        if (urgency) {
+            if (visual.dataset.cgDeadlineUrgency !== urgency) visual.dataset.cgDeadlineUrgency = urgency;
+        } else if (visual.dataset.cgDeadlineUrgency !== undefined) {
+            delete visual.dataset.cgDeadlineUrgency;
+        }
+    }
+
+    function installHomeTaskCountdown() {
+        if (document.getElementById("cg-home-task-countdown")) return;
+        const notice = document.createElement("li");
+        notice.id = "cg-home-task-countdown";
+        notice.className = "index-notice-other-item";
+        const style = document.createElement("style");
+        style.textContent = `
+            .index-notice-other-items.cg-notice-with-countdown {
+                display: grid;
+                grid-template-columns: var(--cg-task-card-width, 1fr) var(--cg-grade-card-width, 1fr);
+                grid-template-rows: auto auto;
+                align-content: start;
+                align-items: stretch;
+                width: 100%;
+                height: auto;
+                margin: 0;
+                gap: 10px;
+            }
+            .cg-notice-with-countdown > .index-notice-other-item {
+                width: auto;
+                max-width: none;
+                min-width: 0;
+                height: auto;
+                min-height: 0;
+                max-height: none;
+                margin: 0;
+                box-sizing: border-box;
+            }
+            .cg-notice-with-countdown > .index-notice-other-item > .index-main-visual-notice-box,
+            .cg-notice-with-countdown > .index-notice-other-item > .cg-index-main-visual-notice-box {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                width: 100%;
+                height: 100%;
+                min-height: 100px;
+                padding: 12px 20px;
+                margin: 0;
+                box-sizing: border-box;
+            }
+            .cg-notice-with-countdown .index-main-visual-notice-box > .title,
+            .cg-notice-with-countdown .cg-index-main-visual-notice-box > .title {
+                margin: 0;
+            }
+            .cg-notice-with-countdown .index-main-visual-notice-box > .content,
+            .cg-notice-with-countdown .cg-index-main-visual-notice-box > .content {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex: 0 0 auto;
+                height: auto;
+                margin: 0;
+            }
+            .cg-notice-with-countdown .count { margin: 0; }
+            .cg-notice-with-countdown > #cg-home-task-countdown {
+                grid-column: 1 / -1;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                padding: 12px;
+                border: 2px solid #a1a1a1;
+                border-radius: 4px;
+                box-shadow: 0 0 3px 0 rgba(57, 57, 57, .15);
+                background: #fff;
+                box-sizing: border-box;
+                color: #333;
+                font-size: 1.4rem;
+                line-height: 1.5;
+                text-align: center;
+            }
+            #cg-home-task-countdown .cg-deadline-heading {
+                color: #666;
+                font-size: 1.2rem;
+            }
+            #cg-home-task-countdown .cg-deadline-clock {
+                max-width: 100%;
+                font-variant-numeric: tabular-nums;
+                font-size: clamp(1.4rem, 1.5vw, 1.8rem);
+                overflow-wrap: anywhere;
+            }
+            @media screen and (max-width: 560px) {
+                .cg-notice-with-countdown > #cg-home-task-countdown {
+                    gap: 4px;
+                    padding: 10px 8px;
+                }
+                #cg-home-task-countdown .cg-deadline-heading {
+                    font-size: 14px;
+                }
+                #cg-home-task-countdown .cg-deadline-clock {
+                    font-size: clamp(12px, 3.4vw, 16px);
+                    line-height: 1.6;
+                }
+            }
+            #cg-home-task-countdown[hidden] { display: none; }
+            .index-main-visual[data-cg-deadline-urgency="warning"] .index-main-visual-bg {
+                background-image: repeating-linear-gradient(135deg, transparent 0 32px, rgba(255, 165, 0, .14) 32px 64px),
+                    linear-gradient(110deg, #49251b, #a74819 55%, #351b1b) !important;
+            }
+            .index-main-visual[data-cg-deadline-urgency="critical"] .index-main-visual-bg {
+                background-image: repeating-linear-gradient(135deg, transparent 0 32px, rgba(255, 60, 60, .2) 32px 64px),
+                    radial-gradient(ellipse at 60% 50%, #bb172c, #540b18 65%, #220910) !important;
+            }
+        `;
+        document.head.appendChild(style);
+        const title = document.createElement("div");
+        title.textContent = "最も近い締め切り";
+        title.className = "cg-deadline-heading";
+        const timer = document.createElement("div");
+        timer.className = "cg-deadline-clock";
+        notice.append(title, timer);
+        notice.hidden = true;
+
+        const updateBackground = remaining => updateDeadlineBackground(document.querySelector(".index-main-visual"), remaining);
+        const renderClock = remaining => {
+            renderDeadlineCountdown(timer, remaining);
+            updateBackground(remaining);
+        };
+        let layoutPanel;
+        let layoutItems = [];
+        const sizePanel = panel => {
+            const items = Array.from(panel.children).filter(item => item !== notice).slice(0, 2);
+            // Measure the site's original card widths before enabling our layout.
+            panel.classList.remove("cg-notice-with-countdown");
+            const widths = items.map(item => item.getBoundingClientRect().width);
+            if (widths[0] > 0) panel.style.setProperty("--cg-task-card-width", `${widths[0]}px`);
+            if ((widths[1] || widths[0]) > 0) panel.style.setProperty("--cg-grade-card-width", `${widths[1] || widths[0]}px`);
+            panel.classList.add("cg-notice-with-countdown");
+            layoutPanel = panel;
+            layoutItems = items;
+        };
+        window.addEventListener("resize", () => {
+            if (layoutPanel?.isConnected) sizePanel(layoutPanel);
+        });
+
+        const update = () => {
+            const panel = document.querySelector(".index-notice-other-items");
+            if (!panel) {
+                notice.hidden = true;
+                updateBackground(Infinity);
+                return;
+            }
+            const items = Array.from(panel.children).filter(item => item !== notice).slice(0, 2);
+            if (layoutPanel !== panel || items.length !== layoutItems.length || items.some((item, index) => item !== layoutItems[index])) {
+                sizePanel(panel);
+            }
+            if (notice.parentElement !== panel || panel.lastElementChild !== notice) panel.appendChild(notice);
+            const list = document.querySelector(".submissionList");
+            if (!list) {
+                notice.hidden = true;
+                updateBackground(Infinity);
+                return;
+            }
+            const texts = Array.from(list.querySelectorAll(".submissionList_item"))
+                .filter(item => item.classList.contains("is-yet") || item.querySelector(".c-status-yet"))
+                .map(item => item.querySelector(".deadline")?.textContent || "");
+            const now = Date.now();
+            const deadline = nearestHomeDeadline(texts, now);
+            notice.hidden = false;
+            if (Number.isFinite(deadline)) {
+                renderClock(deadline - now);
+                timer.title = new Date(deadline).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+            } else {
+                updateBackground(Infinity);
+                timer.textContent = "締切前の課題はありません";
+                Object.assign(timer.style, { color: "", fontWeight: "", textDecoration: "" });
+                timer.removeAttribute("title");
+            }
+        };
+        update();
+        // Refresh task information and the countdown once a second.
+        setInterval(update, 1000);
+    }
+
+    function formatClassPeriod(period) {
+        const normalized = period.normalize("NFKC");
+        const numbers = normalized.match(/\d+/g)?.map(Number);
+        if (!numbers?.length || numbers.some(number => number < 1)) return period;
+        const periods = numbers.length === 2 && /[～〜~−-]/.test(normalized) && numbers[1] >= numbers[0]
+            ? Array.from({ length: numbers[1] - numbers[0] + 1 }, (_, index) => numbers[0] + index)
+            : numbers;
+        const classes = Array.from(new Set(periods.map(number => Math.ceil(number / 2))));
+        return `${classes.join("・")}コマ`;
+    }
+
+    function collectTimetableOrder(doc) {
+        const order = new Map();
+        const slots = new Map();
+        doc.querySelectorAll(".schedule-table tr").forEach(row => {
+            const period = row.querySelector("th")?.textContent.normalize("NFKC").match(/\d+/);
+            if (!period) return;
+            row.querySelectorAll("td[id^=week]").forEach(cell => {
+                const day = Number(cell.id.replace("week", "")) - 1;
+                if (day < 0 || day > 6) return;
+                const slot = day * 100 + Number(period[0]);
+                cell.querySelectorAll("li[id]").forEach(course => {
+                    // Registration IDs are year + subject code + class code.
+                    const key = course.id.slice(4);
+                    order.set(key, Math.min(order.get(key) ?? Infinity, slot));
+                    if (!slots.has(key)) slots.set(key, []);
+                    if (!slots.get(key).some(entry => entry.order === slot)) {
+                        slots.get(key).push({ order: slot, day, period: row.querySelector("th").textContent.normalize("NFKC").replace(/\s+/g, "").trim() });
+                    }
+                });
+            });
+        });
+        return {
+            year: doc.querySelector(".stady-sec02-header .year")?.textContent.match(/\d{4}/)?.[0],
+            semester: doc.querySelector(".stady-sec02-header .c-half-btn .is-active")?.textContent.trim(),
+            order,
+            slots
+        };
+    }
+
+    function sortReferenceOptions(select, timetable, year, semester) {
+        if (!select) return false;
+        const valid = year === timetable.year && semester === timetable.semester && timetable.order.size > 0;
+        const selected = select.value;
+        const options = Array.from(select.options);
+        const days = ["月", "火", "水", "木", "金", "土", "日"];
+        const entries = options.map((option, index) => {
+            if (option.dataset.cgOriginalLabel === undefined) {
+                option.dataset.cgOriginalLabel = option.textContent;
+                option.dataset.cgOriginalPosition = String(index);
+            }
+            const key = option.value.replace(/_/g, "");
+            const order = valid ? timetable.order.get(key) : undefined;
+            const meetings = (timetable.slots?.get(key) || []).slice().sort((a, b) => a.order - b.order);
+            const day = order === undefined ? undefined : Math.floor(order / 100);
+            const schedule = meetings.map(meeting => `${days[meeting.day]}曜 ${formatClassPeriod(meeting.period)}`).join("、");
+            return {
+                option,
+                order: !valid ? Number(option.dataset.cgOriginalPosition) : !option.value ? -1 : order ?? Infinity,
+                index,
+                group: !valid || !option.value ? null : day === undefined ? "曜日・時限未確認" : `${days[day]}曜日`,
+                label: schedule && valid ? `${schedule}｜${option.dataset.cgOriginalLabel}` : option.dataset.cgOriginalLabel
+            };
+        }).sort((a, b) => (a.order - b.order) || a.index - b.index);
+        const unchanged = entries.every((entry, index) => entry.option === options[index] &&
+            entry.option.textContent === entry.label &&
+            (entry.option.parentElement?.tagName === "OPTGROUP" ? entry.option.parentElement.label : null) === entry.group);
+        if (!unchanged) {
+            const doc = select.ownerDocument;
+            const fragment = doc.createDocumentFragment();
+            const groups = new Map();
+            entries.forEach(entry => {
+                entry.option.textContent = entry.label;
+                if (entry.group === null) {
+                    fragment.appendChild(entry.option);
+                } else {
+                    if (!groups.has(entry.group)) {
+                        const group = doc.createElement("optgroup");
+                        group.label = entry.group;
+                        groups.set(entry.group, group);
+                        fragment.appendChild(group);
+                    }
+                    groups.get(entry.group).appendChild(entry.option);
+                }
+            });
+            select.replaceChildren(fragment);
+            select.value = selected;
+        }
+        return valid;
+    }
+
+    function installReferenceTimetableOrder() {
+        if (!document.title.includes("授業参考情報")) return;
+        void (async () => {
+            try {
+                const page = await fetchPage(explicitSubmission(document, location.href, "emptyForm", "SC_07002B00_01/initStudent"));
+                if (page.doc.title !== "履修登録") throw new Error("履修時間割を取得できませんでした。");
+                const timetable = collectTimetableOrder(page.doc);
+                const sort = () => {
+                    const year = document.getElementById("changeStartYearCmb")?.value;
+                    const semester = document.getElementById("changeStartSemesterCmb")?.selectedOptions[0]?.textContent.trim();
+                    sortReferenceOptions(document.getElementById("changeClassSubjectCmb"), timetable, year, semester);
+                };
+                sort();
+                let timer;
+                const observer = new MutationObserver(() => {
+                    clearTimeout(timer);
+                    timer = setTimeout(sort, 100);
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+                document.addEventListener("change", event => {
+                    if (["changeStartYearCmb", "changeStartSemesterCmb"].includes(event.target.id)) sort();
+                });
+            } catch (error) {
+                console.warn("[CG] 授業参考情報の時間割順ソート失敗", error);
+            }
+        })();
+    }
+
     function startComfortableGakujo() {
         console.log("[CG] startComfortableGakujo (page fully loaded)");
+        installReferenceTimetableOrder();
 
         const getHiddenTasks = () => {
             let hiddenTasks = [];
@@ -459,7 +811,7 @@
             const indexMainVisualUserLastLogin = document.getElementsByClassName("index-main-visual-user-last-login")[0];
             indexMainVisualUserLastLogin.innerHTML += ` | <a href="${updateURL}" title="Comfortable Gakujo をアップデート"><span style="display: inline-block; text-decoration: underline; color: blue"">Comfortable Gakujo v${version}</span></a>`;
 
-            const waitForCountElement = new MutationObserver((mutations, obs) => {
+            observeUntilReady(() => {
                 const countElement = document.getElementsByClassName("count")[0];
                 if (countElement) {
                     const countText = countElement.innerText;
@@ -468,7 +820,6 @@
                     if (match) {
                         originalCount = parseInt(match[1], 10);
                     }
-                    obs.disconnect();
                     const hiddenTasks = getHiddenTasks();
                     const now = new Date();
                     let hiddenCount = 0;
@@ -481,10 +832,12 @@
                     if (hiddenCount > 0) {
                         countElement.innerHTML = `<span class="num">${originalCount - hiddenCount}</span>件 + <span style="color: gray;">${hiddenCount}件</span>`;
                     }
+                    return true;
                 }
+                return false;
             });
-            waitForCountElement.observe(document.body, { childList: true, subtree: true });
             showUpdateNotice();
+            void checkGradeUpdates();
 
             const indexMainVisualNotice = document.getElementsByClassName("index-main-visual-notice")[0];
             if (!indexMainVisualNotice.querySelector(".index-main-visual-notice-other")) {
@@ -503,7 +856,7 @@
                 li.innerHTML = `
                     <div class="cg-index-main-visual-notice-box cg-index-notice-other-link">
                         <p class="title" style="text-align: center;">成績更新通知</p>
-                        <div class="content" style="width: fit-content; margin: auto; margin-top: 1em;">
+                        <div class="content">
                             <div class="cg-checkbox-wrapper-8">
                                 <input type="checkbox" id="cg-grade-save-toggle" class="cg-tgl cg-tgl-skewed" checked>
                                 <label for="cg-grade-save-toggle" data-tg-on="ON" data-tg-off="OFF" class="cg-tgl-btn"></label>
@@ -515,7 +868,7 @@
                 li.innerHTML = `
                     <div class="cg-index-main-visual-notice-box cg-index-notice-other-link">
                         <p class="title" style="text-align: center;">成績更新通知</p>
-                        <div class="content" style="width: fit-content; margin: auto; margin-top: 1em;">
+                        <div class="content">
                             <div class="cg-checkbox-wrapper-8">
                                 <input type="checkbox" id="cg-grade-save-toggle" class="cg-tgl cg-tgl-skewed">
                                 <label for="cg-grade-save-toggle" data-tg-on="ON" data-tg-off="OFF" class="cg-tgl-btn"></label>
@@ -692,12 +1045,13 @@
                 `;
             document.head.appendChild(style);
             indexNoticeOtherItems.appendChild(li);
+            installHomeTaskCountdown();
 
             window.addEventListener('change', (e) => {
                 if (e.target.id === 'cg-grade-save-toggle') {
                     if (e.target.checked) {
                         setCookie("cg_grade_save_enabled", "1");
-                        location.reload();
+                        void checkGradeUpdates();
                     } else {
                         deleteCookie("cg_grade_save_enabled");
                         deleteCookie("cg_grade");
@@ -964,15 +1318,6 @@
                 return isNaN(date.getTime()) ? new Date(0) : date;
             };
 
-            const formatTimeLeft = (ms) => {
-                const d = Math.floor(ms / (1000 * 60 * 60 * 24));
-                const h = Math.floor(ms / (1000 * 60 * 60)) % 24;
-                const m = Math.floor(ms / (1000 * 60)) % 60;
-                const s = Math.floor(ms / 1000) % 60;
-                const dayStr = d > 0 ? `${d}日 ` : '';
-                return `残り ${dayStr}${h.toString().padStart(2, '0')}時間 ${m.toString().padStart(2, '0')}分 ${s.toString().padStart(2, '0')}秒`;
-            };
-
             const processTable = () => {
                 const table = document.getElementById("dataTable01");
                 const tbody = table?.querySelector("tbody");
@@ -1056,6 +1401,10 @@
 
                 if (!lengthSelect || !tbody) return;
 
+                if (lengthSelect.value === "-1") {
+                    processTable();
+                    return;
+                }
                 const observer = new MutationObserver((mutations, obs) => {
                     for (const m of mutations) {
                         if (m.type === 'childList' && (m.addedNodes.length || m.removedNodes.length)) {
@@ -1073,18 +1422,17 @@
                 lengthSelect.dispatchEvent(new Event("change", { bubbles: true }));
             };
 
-            const waitForTable = new MutationObserver((_m, obs) => {
+            observeUntilReady(() => {
                 const table = document.getElementById("dataTable01");
                 const tbody = table?.querySelector("tbody");
                 const lengthSelect = document.querySelector('select[name="dataTable01_length"]');
 
                 if (table && tbody && tbody.querySelectorAll("tr").length > 0 && lengthSelect) {
-                    obs.disconnect();
                     triggerLengthChangeAndWait();
+                    return true;
                 }
+                return false;
             });
-
-            waitForTable.observe(document.body, { childList: true, subtree: true });
 
             setInterval(() => {
                 const now = Date.now();
@@ -1092,26 +1440,7 @@
                     const deadline = Number(timer.dataset.deadline);
                     const remaining = deadline - now;
 
-                    if (remaining <= 0) {
-                        timer.textContent = "締切済み";
-                        Object.assign(timer.style, { color: "red", fontWeight: "bold" });
-                    } else {
-                        timer.textContent = formatTimeLeft(remaining);
-                        const days = Math.floor(remaining / (1000 * 60 * 60 * 24));
-                        if (days < 1) {
-                            Object.assign(timer.style, {
-                                color: "red", fontWeight: "bold", textDecoration: "underline"
-                            });
-                        } else if (days < 3) {
-                            Object.assign(timer.style, {
-                                color: "#FF8C00", fontWeight: "bold", textDecoration: "none"
-                            });
-                        } else {
-                            timer.style.color = "";
-                            timer.style.fontWeight = "";
-                            timer.style.textDecoration = "";
-                        }
-                    }
+                    renderDeadlineCountdown(timer, remaining);
                 });
             }, 1000);
 
@@ -1150,9 +1479,7 @@
             }
 
 
-        } else if (document.title === "成績ダッシュボード") {
-            deleteCookie("cg_grade_updated");
-        } else if (document.title === "成績情報") {
+        } else if (document.title === "成績情報" || document.title === "成績情報詳細") {
             deleteCookie("cg_grade_updated");
 
             function collectYearSemesters() {
@@ -1284,20 +1611,21 @@
                 console.log("[CG] Year/Semester filter initialized");
             }
 
-            const waitTable = new MutationObserver((_m, obs) => {
+            observeUntilReady(() => {
                 const table = document.getElementById("02");
                 const tbody = table?.querySelector("tbody tr");
                 if (table && tbody) {
-                    obs.disconnect();
+                    if (!document.getElementsByClassName("seiseki-marker-contents-body")[0]) return false;
                     initYearSemesterFilter();
+                    void checkGradeUpdates();
                     const reportDate = document.getElementById("reportDate");
                     if (reportDate) {
                         reportDate.click();
                     }
+                    return true;
                 }
+                return false;
             });
-
-            waitTable.observe(document.body, { childList: true, subtree: true });
         } else if (document.title === "連絡一覧") {
             const cPageNation = document.getElementsByClassName("c-pagination")[0];
             if (cPageNation) {
@@ -1520,6 +1848,13 @@
             }
         });
 
+        document.addEventListener("click", event => {
+            const button = event.target.closest("#cg-credit-info");
+            if (!button) return;
+            event.preventDefault();
+            void openCreditInfo(button);
+        });
+
         const cMainMenu = document.getElementsByClassName("c-main-menu")[0];
         if (cMainMenu) {
             const sidebar = document.createElement('nav');
@@ -1575,7 +1910,7 @@
                     <a href="javascript:void(0);" onclick="javascript:ClearStorage(); javascript:postSubmit('emptyForm', 'SC_14002B00_01/init')" class="c-gnav-link cg-gnav-link"><i class="c-icon-uploaed" aria-hidden="true"></i>課題提出</a>
                     <a href="javascript:void(0);" onclick="javascript:ClearStorage(); javascript:postSubmit('emptyForm', 'SC_07002B00_01/initStudent')" class="c-gnav-link cg-gnav-link"><i class="c-icon-submission" aria-hidden="true"></i>履修登録</a>
                     <a href="javascript:void(0);" onclick="javascript:ClearStorage(); javascript:postSubmit('emptyForm', 'SC_15005B00_01/init')" class="c-gnav-link cg-gnav-link"><i class="c-icon-graph" aria-hidden="true"></i>成績</a>
-                    <a href="javascript:void(0);" onclick="javascript:ClearStorage(); javascript:sessionStorage.setItem('cg_grade_nav', 'dashboard'); javascript:postSubmit('emptyForm', 'SC_15005B00_01/init')" class="c-gnav-link cg-gnav-link"><i class="c-icon-check" aria-hidden="true"></i>単位情報</a>
+                    <a href="javascript:void(0);" id="cg-credit-info" class="c-gnav-link cg-gnav-link"><i class="c-icon-check" aria-hidden="true"></i>単位情報</a>
                 `;
         }
     }
